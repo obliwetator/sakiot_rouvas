@@ -1,6 +1,6 @@
 // use std::env;
 #![allow(unused_variables)]
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use serenity::{
     async_trait,
@@ -360,7 +360,7 @@ impl EventHandler for Handler {
         _ctx: Context,
         _interaction: serenity::model::interactions::Interaction,
     ) {
-        events::interactions::interaction_create(_ctx, _interaction).await;
+        events::interactions::interactions::interaction_create(_ctx, _interaction).await;
     }
 
     async fn integration_create(
@@ -395,7 +395,8 @@ impl EventHandler for Handler {
         _ctx: Context,
         _application_command: serenity::model::interactions::application_command::ApplicationCommand,
     ) {
-        events::interactions::application_command_create(_ctx, _application_command).await;
+        events::interactions::interactions::application_command_create(_ctx, _application_command)
+            .await;
     }
 
     async fn application_command_update(
@@ -403,7 +404,8 @@ impl EventHandler for Handler {
         _ctx: Context,
         _application_command: serenity::model::interactions::application_command::ApplicationCommand,
     ) {
-        events::interactions::application_command_update(_ctx, _application_command).await;
+        events::interactions::interactions::application_command_update(_ctx, _application_command)
+            .await;
     }
 
     async fn application_command_delete(
@@ -411,12 +413,12 @@ impl EventHandler for Handler {
         _ctx: Context,
         _application_command: serenity::model::interactions::application_command::ApplicationCommand,
     ) {
-        events::interactions::application_command_delete(_ctx, _application_command).await;
+        events::interactions::interactions::application_command_delete(_ctx, _application_command)
+            .await;
     }
 }
 
 pub struct MysqlConnection;
-
 impl TypeMapKey for MysqlConnection {
     type Value = mysql_async::Pool;
 }
@@ -424,6 +426,14 @@ impl TypeMapKey for MysqlConnection {
 pub struct HasBossMusic;
 impl TypeMapKey for HasBossMusic {
     type Value = HashMap<u64, Option<String>>;
+}
+
+pub struct GuildTrack {
+    volume: f32,
+}
+pub struct GuildTrackMap;
+impl TypeMapKey for GuildTrackMap {
+    type Value = Arc<Mutex<HashMap<u64, GuildTrack>>>;
 }
 
 #[tokio::main]
@@ -454,6 +464,7 @@ async fn main() {
         let mut data = client.data.write().await;
         data.insert::<MysqlConnection>(mysql_pool.clone());
         data.insert::<HasBossMusic>(HashMap::new());
+        data.insert::<GuildTrackMap>(Arc::new(Mutex::new(HashMap::new())));
     }
 
     // Finally, start a single shard, and start listening to events.
