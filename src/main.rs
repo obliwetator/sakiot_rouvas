@@ -1,7 +1,8 @@
 // use std::env;
 #![allow(unused_variables)]
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, env, sync::Arc};
 
+use lavalink_rs::{gateway::*, model::*, LavalinkClient};
 use serenity::{
     async_trait,
     client::bridge::gateway::GatewayIntents,
@@ -10,6 +11,8 @@ use serenity::{
     Result as SerenityResult,
 };
 use songbird::{driver::DecodeMode, Config, SerenityInit};
+use tracing::{info, Level};
+use tracing_subscriber::FmtSubscriber;
 
 pub mod config;
 pub mod database;
@@ -418,6 +421,34 @@ impl EventHandler for Handler {
     }
 }
 
+struct Lavalink;
+
+impl TypeMapKey for Lavalink {
+    type Value = LavalinkClient;
+}
+
+struct LavalinkHandler;
+
+#[async_trait]
+impl LavalinkEventHandler for LavalinkHandler {
+    async fn track_start(&self, _client: LavalinkClient, event: TrackStart) {
+        info!("Track started! Guild: {}", event.guild_id);
+    }
+    async fn track_finish(&self, _client: LavalinkClient, event: TrackFinish) {
+        info!("Track finished! Guild: {}", event.guild_id);
+    }
+    /// Periodic event that returns the statistics of the server.
+    async fn stats(&self, _client: LavalinkClient, _event: Stats) {}
+    /// Event that triggers when a player updates.
+    async fn player_update(&self, _client: LavalinkClient, _event: PlayerUpdate) {}
+    /// Event that triggers when an exception happens with a track.
+    async fn track_exception(&self, _client: LavalinkClient, _event: TrackException) {}
+    /// Event that triggers when the websocket connection to the voice channel closes.
+    async fn websocket_closed(&self, _client: LavalinkClient, _event: WebSocketClosed) {}
+    /// Event that triggers when the player gets destroyed on a guild.
+    async fn player_destroyed(&self, _client: LavalinkClient, _event: PlayerDestroyed) {}
+}
+
 pub struct MysqlConnection;
 impl TypeMapKey for MysqlConnection {
     type Value = mysql_async::Pool;
@@ -439,6 +470,14 @@ impl TypeMapKey for GuildTrackMap {
 #[tokio::main]
 async fn main() {
     let mysql_pool = mysql_async::Pool::new(config::DB_URL);
+    let subscriber = FmtSubscriber::builder()
+        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
+        // will be written to stdout.
+        .with_max_level(Level::INFO)
+        // completes the builder.
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     // let a = conn.exec_map("SELECT * FROM guilds WHERE id IN (:id)", db_param, | id | DBGuild { id });
     // Configure the client with your Discord bot token in the environment.
@@ -460,11 +499,25 @@ async fn main() {
         .application_id(application_id)
         .await
         .expect("Err creating client");
+
+    let lava_client = LavalinkClient::builder(UserId(890262092668624917))
+        //let lava_client = LavalinkClient::builder(bot_id, &token)
+        .set_host("127.0.0.1")
+        .set_password(
+            env::var("LAVALINK_PASSWORD").unwrap_or_else(|_| "youshallnotpass".to_string()),
+        )
+        .build(LavalinkHandler)
+        .await
+        .expect("err lavalink client");
+
     {
         let mut data = client.data.write().await;
+        // DB
         data.insert::<MysqlConnection>(mysql_pool.clone());
-        data.insert::<HasBossMusic>(HashMap::new());
+        // Custom data
         data.insert::<GuildTrackMap>(Arc::new(Mutex::new(HashMap::new())));
+        // Lavalink
+        data.insert::<Lavalink>(lava_client);
     }
 
     // Finally, start a single shard, and start listening to events.

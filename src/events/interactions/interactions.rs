@@ -22,24 +22,26 @@ use songbird::{
     input::{Input, Restartable},
     Event, EventContext, EventHandler as VoiceEventHandler, TrackEvent,
 };
-use std::fmt::Write;
 
 use crate::{
     database::get_conn_from_ctx,
-    events::interactions::helpers::{
-        ytdl_input_from_string, ytdl_input_from_string_link, ytdl_playlist,
+    events::interactions::{
+        application_command::*, database::add_track_to_db, helpers::ytdl_input_from_string,
     },
     GuildTrack, GuildTrackMap,
 };
 
-use super::helpers::{
-    get_guild_channel_id_from_interaction_application,
-    get_guild_channel_id_from_interaction_message,
+use super::{
+    get_songbird_manager,
+    helpers::{
+        get_guild_channel_id_from_interaction_application,
+        get_guild_channel_id_from_interaction_message,
+    },
 };
 
-struct TrackEndNotifier {
-    chann_id: ChannelId,
-    http: Arc<Http>,
+pub struct TrackEndNotifier {
+    pub chann_id: ChannelId,
+    pub http: Arc<Http>,
 }
 
 #[async_trait]
@@ -55,9 +57,9 @@ impl VoiceEventHandler for TrackEndNotifier {
     }
 }
 
-struct TrackPlayNotifier {
-    ctx: Context,
-    guild_id: GuildId,
+pub struct TrackPlayNotifier {
+    pub ctx: Context,
+    pub guild_id: GuildId,
 }
 #[async_trait]
 impl VoiceEventHandler for TrackPlayNotifier {
@@ -88,7 +90,7 @@ pub async fn interaction_create(ctx: Context, interaction: Interaction) {
     if let Interaction::ApplicationCommand(command) = interaction {
         println!("interaction name: {}", command.data.name);
         match command.data.name.as_str() {
-            "j" => process_audio_link(&ctx, &command).await,
+            "j" => handle_j(&ctx, &command).await,
             "que" => display_current_queue(&ctx, &command).await,
             "help" => send_interaction_message_basic(&command, &ctx, ":(").await,
             "vol" => handle_vol(&ctx, &command).await,
@@ -194,173 +196,6 @@ pub async fn interaction_create(ctx: Context, interaction: Interaction) {
     println!("Time elapsed: {} nanos", now.elapsed().as_nanos());
 }
 
-async fn handle_join(ctx: &Context, command: &ApplicationCommandInteraction) {
-    let (guild_id, channel_id) =
-        get_guild_channel_id_from_interaction_application(command, ctx).await;
-
-    let connect_to = match channel_id {
-        Some(channel) => channel,
-        None => {
-            let _ = command
-                .edit_original_interaction_response(&ctx, |f| {
-                    f.content("Not in a voice channel".to_string())
-                })
-                .await;
-            return;
-        }
-    };
-
-    let manager = get_songbird_manager(ctx).await;
-
-    match manager.get(guild_id) {
-        Some(handle_lock) => {
-            // let handle = handle_lock.lock().await;
-            // conected do nothing
-            send_interaction_message_basic(command, ctx, "already in a channel").await;
-        }
-        None => {
-            // No handle bot is not in a channel is this guild. Create a new handle
-            // handle_no_handle(manager, guild_id, connect_to, ctx, command).await;
-
-            let (handle_lock, success) = manager.join(guild_id, connect_to).await;
-            match success {
-                Ok(_) => {}
-                Err(err) => {
-                    panic!("Cannot join voice channel: {}", err)
-                }
-            }
-            let mut handle = handle_lock.lock().await;
-            let send_http = ctx.http.clone();
-            let chann_id = command.channel_id;
-
-            {
-                let data_write = ctx.data.read().await;
-                let data = data_write
-                    .get::<GuildTrackMap>()
-                    .expect("cannot get GuildTrackMap")
-                    .clone();
-                let mut mutex_guard = data.lock().await;
-                // TODO: Get value from DB
-                mutex_guard.insert(guild_id.0, GuildTrack { volume: 0.5 });
-            }
-
-            handle.add_global_event(
-                Event::Track(TrackEvent::End),
-                TrackEndNotifier {
-                    chann_id,
-                    http: send_http.clone(),
-                },
-            );
-
-            handle.add_global_event(
-                Event::Track(TrackEvent::Play),
-                TrackPlayNotifier {
-                    ctx: ctx.clone(),
-                    guild_id,
-                },
-            );
-
-            send_interaction_message_basic(command, ctx, "joined").await;
-        }
-    };
-}
-
-async fn handle_playlist(ctx: &Context, command: &ApplicationCommandInteraction) {
-    // Immediatly respond to the interaction which we will edit later
-    match command
-        .create_interaction_response(&ctx.http, |response| {
-            response
-                .kind(InteractionResponseType::DeferredChannelMessageWithSource)
-                .interaction_response_data(|message| {
-                    message
-                        .components(|comp| {
-                            comp.create_action_row(|row| {
-                                row.create_button(|btn| {
-                                    btn.custom_id("foo")
-                                        .label("click me")
-                                        .style(ButtonStyle::Primary)
-                                })
-                            })
-                        })
-                        .content("Processing")
-                })
-        })
-        .await
-    {
-        Ok(_) => {}
-        Err(err) => {
-            println!("Cannot respond to slash command 2: {}", err)
-        }
-    }
-
-    let (guild_id, channel_id) =
-        get_guild_channel_id_from_interaction_application(command, ctx).await;
-
-    let connect_to = match channel_id {
-        Some(channel) => channel,
-        None => {
-            let _ = command
-                .edit_original_interaction_response(&ctx, |f| {
-                    f.content("Not in a voice channel".to_string())
-                })
-                .await;
-            return;
-        }
-    };
-
-    let manager = get_songbird_manager(ctx).await;
-
-    match manager.get(guild_id) {
-        Some(handle_lock) => {
-            let handle = handle_lock.lock().await;
-            let queue = handle.queue().clone();
-            let option = command
-                .data
-                .options
-                .get(0)
-                .expect("Expected required field")
-                .resolved
-                .as_ref()
-                .expect("Expected required value");
-            if let ApplicationCommandInteractionDataOptionValue::String(option) = option {
-                // TDOD: proper link validation
-                if option.contains("youtube.com") {
-                    let count = ytdl_playlist(option).await;
-
-                    // handle.enqueue_source(input);
-
-                    play_audio_from_string(
-                        command,
-                        ctx,
-                        format!("testing playlist: {} song in the playlist", count).as_str(),
-                    )
-                    .await;
-                    // let (ffmpeg, title, ext) = result.await;
-                    // add_track_to_db(ctx, guild_id, title, ext).await;
-                } else {
-                    println!("error in play playlist");
-                }
-            } else {
-                // Not a string. This should not happen?
-                match command
-                    .edit_original_interaction_response(ctx, |f| f.content("Provide a string"))
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(err) => {
-                        panic!("cannot send response err 2: {}", err)
-                    }
-                };
-            }
-            // handle_handle(handle_lock, command, ctx).await;
-        }
-        None => {
-            // No handle bot is not in a channel is this guild. Create a new handle
-            handle_no_handle(manager, guild_id, connect_to, ctx, command).await;
-        }
-    };
-}
-
 async fn handle_delete_and_skip_from_jam(ctx: &Context, command: &MessageComponentInteraction) {
     // TODO: lock is aquired in each function
     handle_next_audio_in_queue(ctx, command).await;
@@ -371,16 +206,9 @@ async fn handle_delete_and_skip_from_jam(ctx: &Context, command: &MessageCompone
 async fn delete_from_jam(command: &MessageComponentInteraction, ctx: &Context) {
     let (guild_id, channel_id) = get_guild_channel_id_from_interaction_message(command, ctx).await;
 
-    let connect_to = match channel_id {
-        Some(channel) => channel,
-        None => {
-            let _ = command
-                .edit_original_interaction_response(&ctx, |f| {
-                    f.content("Not in a voice channel".to_string())
-                })
-                .await;
-            return;
-        }
+    let connect_to = match not_in_a_voice_channel_message(channel_id, command, ctx).await {
+        Some(value) => value,
+        None => return,
     };
     let manager = get_songbird_manager(ctx).await;
 
@@ -422,104 +250,6 @@ async fn delete_from_jam(command: &MessageComponentInteraction, ctx: &Context) {
     };
 }
 
-// This command will try to set both the current and global volume
-async fn handle_vol(ctx: &Context, command: &ApplicationCommandInteraction) {
-    let (guild_id, channel_id) =
-        get_guild_channel_id_from_interaction_application(command, ctx).await;
-
-    let connect_to = match channel_id {
-        Some(channel) => channel,
-        None => {
-            let _ = command
-                .edit_original_interaction_response(&ctx, |f| {
-                    f.content("Not in a voice channel".to_string())
-                })
-                .await;
-            return;
-        }
-    };
-
-    match command.data.options.get(0) {
-        Some(float) => {
-            let option = float.resolved.as_ref().expect("cannot get value");
-            // we have a value change the volume
-            if let ApplicationCommandInteractionDataOptionValue::Number(value) = option {
-                let value_percent = (*value / 100.0) as f32;
-                if !(0.0..2.01).contains(&value_percent) {
-                    send_interaction_message_basic(command, ctx, "vol must be > 0 and < 200").await;
-                    return;
-                }
-
-                let manager = get_songbird_manager(ctx).await;
-                match manager.get(guild_id) {
-                    Some(handle_lock) => {
-                        let handle = handle_lock.lock().await;
-                        let queue = handle.queue().clone();
-                        // Try to set the currently playing song volume
-                        if let Some(ok) = queue.current() {
-                            ok.set_volume(value_percent).expect("cannot set volume");
-                        };
-                    }
-                    None => {
-                        send_interaction_message_basic(
-                            command,
-                            ctx,
-                            "bot is not present in the channel",
-                        )
-                        .await;
-
-                        return;
-                    }
-                };
-                // Set the global volume as well
-                {
-                    let map_lock = {
-                        let data_read = ctx.data.read().await;
-                        let data = data_read.get::<GuildTrackMap>().expect("msg").clone();
-                        data
-                    };
-                    let mut mutex_guard = map_lock.lock().await;
-                    let guild_track = mutex_guard
-                        .get_mut(&command.guild_id.unwrap().0)
-                        .expect("expected initialized value");
-                    guild_track.volume = value_percent;
-                }
-
-                send_interaction_message_basic(
-                    command,
-                    ctx,
-                    format!("Volume changed to :{}%", value_percent * 100.0).as_str(),
-                )
-                .await;
-            } else {
-                // TODO: error message not a float. This should not happen?
-                println!("not a float");
-            }
-        }
-        None => {
-            {
-                let map_lock = {
-                    let data_read = ctx.data.read().await;
-                    let data = data_read.get::<GuildTrackMap>().expect("msg").clone();
-                    data
-                };
-                let mutex_guard = map_lock.lock().await;
-                let guild_track = mutex_guard
-                    .get(&command.guild_id.unwrap().0)
-                    .expect("expected initialized value");
-                let vol = guild_track.volume;
-                // no value send the qurrent volume
-                send_interaction_message_basic(
-                    command,
-                    ctx,
-                    format!("volume is set to: {}%", vol * 100.0).as_str(),
-                )
-                .await;
-            }
-        }
-    }
-}
-
 struct JamIt {
     // guild_id: u64,
     audio_name: String,
@@ -555,16 +285,9 @@ async fn handle_jam_it(ctx: &Context, command: &MessageComponentInteraction) {
     }
     // TODO: local state after first query
     let (guild_id, channel_id) = get_guild_channel_id_from_interaction_message(command, ctx).await;
-    let connect_to = match channel_id {
-        Some(channel) => channel,
-        None => {
-            let _ = command
-                .edit_original_interaction_response(&ctx, |f| {
-                    f.content("Not in a voice channel".to_string())
-                })
-                .await;
-            return;
-        }
+    let connect_to = match not_in_a_voice_channel_message(channel_id, command, ctx).await {
+        Some(value) => value,
+        None => return,
     };
     let mut conn = get_conn_from_ctx(ctx).await;
     let query = format!(
@@ -1070,82 +793,6 @@ async fn handle_next_audio_in_queue(
     };
 }
 
-async fn display_current_queue(ctx: &Context, command: &ApplicationCommandInteraction) {
-    let (guild_id, channel_id) =
-        get_guild_channel_id_from_interaction_application(command, ctx).await;
-    let manager = get_songbird_manager(ctx).await;
-
-    match manager.get(guild_id) {
-        Some(handle_lock) => {
-            // handle_handle(handle_lock, command, ctx).await;
-            let handle = handle_lock.lock().await;
-            let queue = handle.queue();
-            if queue.is_empty() {
-                match command
-                    .create_interaction_response(ctx, |f| {
-                        f.kind(InteractionResponseType::ChannelMessageWithSource)
-                            .interaction_response_data(|message| {
-                                message.content("No audio queued").flags(
-                                    InteractionApplicationCommandCallbackDataFlags::EPHEMERAL,
-                                )
-                            })
-                    })
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(err) => {
-                        panic!("cannot send response err: {}", err)
-                    }
-                };
-                return;
-            }
-
-            let current_queue = queue.current_queue();
-            let mut output = String::from("Currently queued tracks\n");
-            for (i, ele) in current_queue.iter().enumerate() {
-                let metadata = ele.metadata().clone();
-                let artist = &metadata
-                    .artist
-                    .unwrap_or_else(|| "Unkown artist".to_string());
-                let title = &metadata.title.unwrap_or_else(|| "Unkown title".to_string());
-
-                writeln!(&mut output, "{}) {}", i + 1, title).expect("cannot write to buffer");
-            }
-
-            match command
-                .create_interaction_response(ctx, |f| {
-                    f.kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|message| message.content(output))
-                })
-                .await
-            {
-                Ok(_) => {}
-                Err(err) => {
-                    panic!("cannot send response err: {}", err)
-                }
-            };
-        }
-        None => {
-            match command
-                .create_interaction_response(ctx, |f| {
-                    f.kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|message| {
-                            message
-                                .content("bot is not present in a voice channel")
-                                .flags(InteractionApplicationCommandCallbackDataFlags::EPHEMERAL)
-                        })
-                })
-                .await
-            {
-                Ok(_) => {}
-                Err(err) => {
-                    panic!("cannot send response err: {}", err)
-                }
-            };
-        }
-    };
-}
-
 async fn send_interaction_message_basic_from_message(
     ctx: &Context,
     command: &MessageComponentInteraction,
@@ -1165,56 +812,11 @@ async fn send_interaction_message_basic_from_message(
     };
 }
 
-async fn send_interaction_message_basic(
-    command: &ApplicationCommandInteraction,
+async fn not_in_a_voice_channel_message(
+    channel_id: Option<ChannelId>,
+    command: &MessageComponentInteraction,
     ctx: &Context,
-    content: &str,
-) {
-    match command
-        .create_interaction_response(ctx, |f| {
-            f.kind(InteractionResponseType::ChannelMessageWithSource)
-                .interaction_response_data(|message| message.content(content))
-        })
-        .await
-    {
-        Ok(_) => {}
-        Err(err) => {
-            panic!("cannot send response err: {}", err)
-        }
-    };
-}
-
-async fn process_audio_link(ctx: &Context, command: &ApplicationCommandInteraction) {
-    // Immediatly respond to the interaction which we will edit later
-    match command
-        .create_interaction_response(&ctx.http, |response| {
-            response
-                .kind(InteractionResponseType::DeferredChannelMessageWithSource)
-                .interaction_response_data(|message| {
-                    message
-                        .components(|comp| {
-                            comp.create_action_row(|row| {
-                                row.create_button(|btn| {
-                                    btn.custom_id("foo")
-                                        .label("click me")
-                                        .style(ButtonStyle::Primary)
-                                })
-                            })
-                        })
-                        .content("Processing")
-                })
-        })
-        .await
-    {
-        Ok(_) => {}
-        Err(err) => {
-            println!("Cannot respond to slash command 2: {}", err)
-        }
-    }
-
-    let (guild_id, channel_id) =
-        get_guild_channel_id_from_interaction_application(command, ctx).await;
-
+) -> Option<ChannelId> {
     let connect_to = match channel_id {
         Some(channel) => channel,
         None => {
@@ -1223,117 +825,19 @@ async fn process_audio_link(ctx: &Context, command: &ApplicationCommandInteracti
                     f.content("Not in a voice channel".to_string())
                 })
                 .await;
-            return;
+            return None;
         }
     };
-
-    let manager = get_songbird_manager(ctx).await;
-
-    match manager.get(guild_id) {
-        Some(handle_lock) => {
-            let mut handle = handle_lock.lock().await;
-            let queue = handle.queue().clone();
-            let option = command
-                .data
-                .options
-                .get(0)
-                .expect("Expected required field")
-                .resolved
-                .as_ref()
-                .expect("Expected required value");
-            if let ApplicationCommandInteractionDataOptionValue::String(option) = option {
-                // TDOD: proper link validation
-                if option.contains("youtube.com") {
-                    let result = ytdl_input_from_string_link(option);
-                    let ytdl_link = Restartable::ytdl(option.to_owned(), true)
-                        .await
-                        .expect("cannot");
-                    // COnvert to input to access metadata
-                    let input = songbird::input::Input::from(ytdl_link);
-
-                    let metadata = input.metadata.clone();
-                    let artist = &metadata
-                        .artist
-                        .unwrap_or_else(|| "Unkown artist".to_string());
-                    let title = &metadata.title.unwrap_or_else(|| "Unkown title".to_string());
-
-                    handle.enqueue_source(input);
-
-                    play_audio_from_string(command, ctx, title).await;
-                    let (ffmpeg, title, ext) = result.await;
-                    add_track_to_db(ctx, guild_id, title, ext).await;
-                    // play_audio_from_string(command, ctx, &queue, final_title).await;
-                } else if option.contains("patrykstyla.com") {
-                    match command
-                        .edit_original_interaction_response(ctx, |f| f.content("Not working yet"))
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(err) => {
-                            panic!("cannot send response err 2: {}", err)
-                        }
-                    };
-                } else {
-                    let result = ytdl_input_from_string(option);
-                    let ytdl_search = Restartable::ytdl_search(option, true)
-                        .await
-                        .expect("cannot");
-                    let input = songbird::input::Input::from(ytdl_search);
-
-                    let metadata = input.metadata.clone();
-                    let artist = &metadata
-                        .artist
-                        .unwrap_or_else(|| "Unkown artist".to_string());
-                    let title = &metadata.title.unwrap_or_else(|| "Unkown title".to_string());
-                    // process string
-                    handle.enqueue_source(input);
-
-                    play_audio_from_string(command, ctx, title).await;
-                    let (ffmpeg, title, ext) = result.await;
-                    add_track_to_db(ctx, guild_id, title, ext).await;
-                }
-                println!("audio queued len: {}", &queue.len());
-            } else {
-                // Not a string. This should not happen?
-                match command
-                    .edit_original_interaction_response(ctx, |f| f.content("Provide a string"))
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(err) => {
-                        panic!("cannot send response err 2: {}", err)
-                    }
-                };
-            }
-            // handle_handle(handle_lock, command, ctx).await;
-        }
-        None => {
-            // No handle bot is not in a channel is this guild. Create a new handle
-            handle_no_handle(manager, guild_id, connect_to, ctx, command).await;
-        }
-    };
-
-    // TODO: Check if we are already playing anything.
+    Some(connect_to)
 }
 
-async fn add_track_to_db(
-    ctx: &Context,
-    guild_id: serenity::model::id::GuildId,
-    title: String,
-    ext: String,
-) {
-    let mut conn = get_conn_from_ctx(ctx).await;
-    let query = format!(
-        "INSERT IGNORE INTO jam_it (id, guild_id, audio_name, ext) VALUES (NULL, '{}', '{}', '{}')",
-        guild_id, title, ext
-    );
-
-    match conn.query_drop(query).await {
-        Ok(ok) => {}
-        Err(err) => {
-            panic!("error when trying to insert")
-        }
-    }
+pub async fn download_track_async(ctx: &Context, option: &str, guild_id: GuildId) {
+    let ctx1 = ctx.clone();
+    let stra = Arc::new(option.to_owned());
+    tokio::spawn(async move {
+        let (title, ext) = ytdl_input_from_string(&stra).await;
+        add_track_to_db(ctx1, guild_id, title, ext).await;
+    });
 }
 
 // async fn handle_handle(
@@ -1411,7 +915,7 @@ async fn add_track_to_db(
 //     }
 // }
 
-async fn ffmpeg_input_from_string(title: &str, ext: &str) -> songbird::input::Restartable {
+pub async fn ffmpeg_input_from_string(title: &str, ext: &str) -> songbird::input::Restartable {
     let ffmpeg_input = Restartable::ffmpeg(
         format!(
             "/home/ubuntu/projects/sakiot_rouvas/temp_video/{}.{}",
@@ -1423,156 +927,6 @@ async fn ffmpeg_input_from_string(title: &str, ext: &str) -> songbird::input::Re
     .expect("error with ffmpeg songibrd");
 
     ffmpeg_input
-}
-
-async fn handle_no_handle(
-    manager: Arc<songbird::Songbird>,
-    guild_id: serenity::model::id::GuildId,
-    connect_to: ChannelId,
-    ctx: &Context,
-    command: &ApplicationCommandInteraction,
-) {
-    let (handle_lock, success) = manager.join(guild_id, connect_to).await;
-    match success {
-        Ok(_) => {}
-        Err(err) => {
-            panic!("Cannot join voice channel: {}", err)
-        }
-    }
-    let mut handle = handle_lock.lock().await;
-    let queue = handle.queue().clone();
-    let send_http = ctx.http.clone();
-    let chann_id = command.channel_id;
-
-    {
-        let data_write = ctx.data.read().await;
-        let data = data_write
-            .get::<GuildTrackMap>()
-            .expect("cannot get GuildTrackMap")
-            .clone();
-        let mut mutex_guard = data.lock().await;
-        // TODO: Get value from DB
-        mutex_guard.insert(guild_id.0, GuildTrack { volume: 0.5 });
-    }
-
-    handle.add_global_event(
-        Event::Track(TrackEvent::End),
-        TrackEndNotifier {
-            chann_id,
-            http: send_http.clone(),
-        },
-    );
-
-    handle.add_global_event(
-        Event::Track(TrackEvent::Play),
-        TrackPlayNotifier {
-            ctx: ctx.clone(),
-            guild_id,
-        },
-    );
-
-    let option = command
-        .data
-        .options
-        .get(0)
-        .expect("Expected required field")
-        .resolved
-        .as_ref()
-        .expect("Expected required value");
-    if let ApplicationCommandInteractionDataOptionValue::String(option) = option {
-        // TDOD: proper link validation
-        if option.contains("youtube.com") {
-            let result = ytdl_input_from_string_link(option);
-            let ytdl_link = Restartable::ytdl(option.to_owned(), true)
-                .await
-                .expect("cannot");
-            let input = songbird::input::Input::from(ytdl_link);
-
-            let metadata = input.metadata.clone();
-            let artist = &metadata
-                .artist
-                .unwrap_or_else(|| "Unkown artist".to_string());
-            let title = &metadata.title.unwrap_or_else(|| "Unkown title".to_string());
-
-            handle.enqueue_source(input);
-
-            play_audio_from_string(command, ctx, title).await;
-            let (ffmpeg, title, ext) = result.await;
-            add_track_to_db(ctx, guild_id, title, ext).await;
-        } else if option.contains("patrykstyla.com") {
-            match command
-                .edit_original_interaction_response(ctx, |f| f.content("Not working yet"))
-                .await
-            {
-                Ok(_) => {}
-                Err(err) => {
-                    panic!("cannot send response err 2: {}", err)
-                }
-            };
-        } else {
-            // process string
-            let result = ytdl_input_from_string(option);
-            let ytdl_search = Restartable::ytdl_search(option, true)
-                .await
-                .expect("cannot");
-            let input = songbird::input::Input::from(ytdl_search);
-
-            let metadata = input.metadata.clone();
-            let artist = &metadata
-                .artist
-                .unwrap_or_else(|| "Unkown artist".to_string());
-            let title = &metadata.title.unwrap_or_else(|| "Unkown title".to_string());
-            // process string
-            handle.enqueue_source(input);
-            let curr_queue = queue.current().expect("");
-            {
-                let map_lock = {
-                    let data_read = ctx.data.read().await;
-                    let data = data_read.get::<GuildTrackMap>().expect("msg").clone();
-                    data
-                };
-                let mutex_guard = map_lock.lock().await;
-                let guild_track = mutex_guard
-                    .get(&guild_id.0)
-                    .expect("expected initialized value");
-                let vol = guild_track.volume;
-                // reduce the volume of the first track
-                if queue.len() == 1 {
-                    // reduce the volume of the first track
-                    queue
-                        .current()
-                        .expect("cannot get current queue")
-                        .set_volume(vol)
-                        .expect("cannot set volume");
-                }
-            }
-            play_audio_from_string(command, ctx, title).await;
-            let (ffmpeg, title, ext) = result.await;
-            add_track_to_db(ctx, guild_id, title, ext).await;
-            // match command
-            //     .edit_original_interaction_response(ctx, |f| f.content("Use a proper link"))
-            //     .await
-            // {
-            //     Ok(_) => {}
-            //     Err(err) => {
-            //         panic!("cannot send response err 2: {}", err)
-            //     }
-            // };
-        }
-
-        println!("audio queued len: {}", queue.len());
-    } else {
-        // Not a string. This should not happen?
-        match command
-            .edit_original_interaction_response(ctx, |f| f.content("Provide a string"))
-            .await
-        {
-            Ok(_) => {}
-            Err(err) => {
-                panic!("cannot send response err 2: {}", err)
-            }
-        };
-    }
 }
 
 async fn handle_no_handle_from_message_component(
@@ -1623,64 +977,6 @@ async fn handle_no_handle_from_message_component(
     );
 
     handle.enqueue_source(new_input);
-}
-
-async fn play_audio_from_string(
-    command: &ApplicationCommandInteraction,
-    ctx: &Context,
-    title: &str,
-) {
-    let a = command
-        .edit_original_interaction_response(&ctx.http, |response| {
-            response
-                .components(|comp| {
-                    comp.create_action_row(|row| {
-                        row.create_button(|btn| {
-                            btn.custom_id("play")
-                                .emoji(ReactionType::Unicode("⏯️".to_string()))
-                                .style(ButtonStyle::Secondary)
-                        })
-                        .create_button(|btn| {
-                            btn.custom_id("next")
-                                .emoji(ReactionType::Custom {
-                                    animated: false,
-                                    id: EmojiId(365591266269855746),
-                                    name: Some("residentsleeper".to_string()),
-                                })
-                                .style(ButtonStyle::Secondary)
-                        })
-                        .create_button(|btn| {
-                            btn.custom_id("stop")
-                                .emoji(ReactionType::Unicode("⏹️".to_string()))
-                                .style(ButtonStyle::Secondary)
-                        })
-                        .create_button(|btn| {
-                            btn.custom_id("ff")
-                                .emoji(ReactionType::Unicode("⏭️".to_string()))
-                                .style(ButtonStyle::Secondary)
-                        })
-                        .create_button(|btn| {
-                            btn.custom_id("jam_it")
-                                .emoji(ReactionType::Custom {
-                                    animated: false,
-                                    id: EmojiId(882285453661835364),
-                                    name: Some("reggie".to_string()),
-                                })
-                                .label("")
-                                .style(ButtonStyle::Secondary)
-                        })
-                    })
-                })
-                .content(format!("Playing a jammer: {}", title))
-        })
-        .await;
-
-    match a {
-        Ok(_) => {}
-        Err(err) => {
-            println!("Cannot respond to slash command 2: {}", err)
-        }
-    }
 }
 
 async fn play_audio_from_string_from_message_component(
@@ -1748,13 +1044,6 @@ async fn play_audio_from_string_from_message_component(
             println!("Cannot respond to slash command 2: {}", err)
         }
     }
-}
-
-async fn get_songbird_manager(ctx: &Context) -> Arc<songbird::Songbird> {
-    let manager = songbird::get(ctx)
-        .await
-        .expect("Songbird Voice client placed in at initialisation.");
-    manager
 }
 
 pub async fn application_command_create(_ctx: Context, _application_command: ApplicationCommand) {
