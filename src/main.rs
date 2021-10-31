@@ -500,7 +500,7 @@ async fn main() {
         .await
         .expect("Err creating client");
 
-    let lava_client = LavalinkClient::builder(UserId(890262092668624917))
+    let lava_client = match LavalinkClient::builder(UserId(890262092668624917))
         //let lava_client = LavalinkClient::builder(bot_id, &token)
         .set_host("127.0.0.1")
         .set_password(
@@ -508,7 +508,38 @@ async fn main() {
         )
         .build(LavalinkHandler)
         .await
-        .expect("err lavalink client");
+    {
+        Ok(ok) => ok,
+        Err(err) => {
+            let mut restart_counter = 0;
+            loop {
+                if restart_counter > 10 {
+                    // lavalink is probably not initiated
+                    panic!("lavalink error: {}", err);
+                } else {
+                    restart_counter += 1;
+                    if let Ok(ok) = LavalinkClient::builder(UserId(890262092668624917))
+                        .set_host("127.0.0.1")
+                        .set_password(
+                            env::var("LAVALINK_PASSWORD")
+                                .unwrap_or_else(|_| "youshallnotpass".to_string()),
+                        )
+                        .build(LavalinkHandler)
+                        .await
+                    {
+                        break ok;
+                    } else {
+                        info!(
+                            "Trying to reconect to lavalink for the {} time",
+                            restart_counter
+                        );
+                    }
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
+        }
+    };
 
     {
         let mut data = client.data.write().await;
