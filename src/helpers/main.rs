@@ -80,7 +80,7 @@ pub async fn download_attachment(
             result
         }
         Err(err) => {
-            println!("Cannot convert");
+            println!("Cannot convert: {}", err);
             check_msg(msg.reply(ctx, "Cannot convert file").await);
             return;
         }
@@ -104,14 +104,4 @@ pub async fn download_attachment(
     println!("err {}", String::from_utf8_lossy(&command1.stderr));
     println!("out {}", String::from_utf8_lossy(&command1.stdout));
     println!("status {}", command1.status.to_string());
-}
-
-pub async fn download_youtube(
-    ctx: &Context,
-    url: &str,
-    boss_music_file_path: &str,
-    file_name: &str,
-    msg: &serenity::model::channel::Message,
-    user_id: &u64,
-) {
 }

@@ -33,10 +33,10 @@ pub async fn update_chhanel_name() {}
 
 pub async fn get_dm_channel() {}
 
-pub async fn sync_channels(ctx: &Context) {
+pub async fn sync_channels(_ctx: &Context) {
     todo!()
 }
 
-pub async fn sync_channel_roles(ctx: &Context) {
+pub async fn sync_channel_roles(_ctx: &Context) {
     todo!()
 }

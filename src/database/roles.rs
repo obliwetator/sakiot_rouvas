@@ -22,4 +22,4 @@ pub async fn get_roles() {}
 
 pub async fn get_roles_in_a_guild() {}
 
-pub async fn sync_roles(ctx: &Context) {}
+pub async fn sync_roles(_ctx: &Context) {}

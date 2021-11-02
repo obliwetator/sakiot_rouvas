@@ -1,5 +1,3 @@
-// #![allow(dead_code, unused_variables)]
-
 use mysql_async::{Conn, Pool};
 use serenity::client::Context;
 

@@ -12,4 +12,4 @@ pub async fn get_emoji() {}
 
 pub async fn update_emoji_name() {}
 
-pub async fn sync_emojis(ctx: &Context) {}
+pub async fn sync_emojis(_ctx: &Context) {}

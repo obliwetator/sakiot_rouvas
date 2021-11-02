@@ -1,4 +1,5 @@
 use serenity::client::Context;
+use tracing::info;
 
 use crate::config::APPLICATION_ID;
 
@@ -13,13 +14,15 @@ pub async fn voice_server_update(
 pub async fn voice_state_update(
     ctx: Context,
     guild_id: Option<serenity::model::id::GuildId>,
-    old_state: Option<serenity::model::prelude::VoiceState>,
+    _old_state: Option<serenity::model::prelude::VoiceState>,
     new_state: serenity::model::prelude::VoiceState,
 ) {
     if new_state.user_id.0 == APPLICATION_ID && new_state.channel_id.is_none() {
         let manager = get_songbird_manager(&ctx).await;
-        match manager.leave(guild_id.expect("expected guild_id")).await {
-            Ok(ok) => {}
+        match manager.remove(guild_id.expect("expected guild_id")).await {
+            Ok(_ok) => {
+                info!("Call removed")
+            }
             Err(err) => {
                 panic!("cannot leave channel: {}", err);
             }

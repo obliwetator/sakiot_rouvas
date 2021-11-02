@@ -17,9 +17,9 @@ pub async fn add_track_to_db(
     );
 
     match conn.query_drop(query).await {
-        Ok(ok) => {}
+        Ok(_) => {}
         Err(err) => {
-            panic!("error when trying to insert")
+            panic!("error when trying to insert: {}", err)
         }
     }
 

@@ -1,15 +1,13 @@
-use std::time::Instant;
-
 use serenity::{
     client::Context,
     model::channel::{Message, MessageType},
 };
 
-pub async fn message(ctx: Context, msg: Message) {
+pub async fn message(_ctx: Context, msg: Message) {
     // let pool = db_helper::get_pool_from_ctx(&ctx).await;
     // db_helper::get_channels(&pool).await;
 
-    let now = Instant::now();
+    // let _now = Instant::now();
     // println!("message is {}", msg.content);
     match msg.kind {
         MessageType::ApplicationCommand => {}
