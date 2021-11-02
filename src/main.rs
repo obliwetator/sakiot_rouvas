@@ -1,5 +1,4 @@
 // use std::env;
-#![allow(unused_variables)]
 use std::{collections::HashMap, env, sync::Arc};
 
 use lavalink_rs::{gateway::*, model::*, LavalinkClient};
@@ -24,7 +23,7 @@ struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn cache_ready(&self, ctx: Context, guilds: Vec<serenity::model::id::GuildId>) {
+    async fn cache_ready(&self, _ctx: Context, _guilds: Vec<serenity::model::id::GuildId>) {
         // // Ensure we have the same guilds as we curently received
         // guilds::sync_guilds(&ctx, guilds).await;
         // // Ensure the same users are present in the DB. NOTE: in large this will probably wont work(?).
@@ -304,7 +303,7 @@ impl EventHandler for Handler {
     ) {
     }
 
-    async fn ready(&self, ctx: Context, ready: Ready) {
+    async fn ready(&self, _ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
         // println!("ready: {:#?}", ready.guilds);
     }
@@ -431,22 +430,30 @@ struct LavalinkHandler;
 
 #[async_trait]
 impl LavalinkEventHandler for LavalinkHandler {
+    /// Periodic event that returns the statistics of the server.
+    async fn stats(&self, _client: LavalinkClient, _event: Stats) {}
+    /// Event that triggers when a player updates.
+    async fn player_update(&self, _client: LavalinkClient, _event: PlayerUpdate) {
+        // info!("player update");
+    }
     async fn track_start(&self, _client: LavalinkClient, event: TrackStart) {
         info!("Track started! Guild: {}", event.guild_id);
     }
     async fn track_finish(&self, _client: LavalinkClient, event: TrackFinish) {
         info!("Track finished! Guild: {}", event.guild_id);
     }
-    /// Periodic event that returns the statistics of the server.
-    async fn stats(&self, _client: LavalinkClient, _event: Stats) {}
-    /// Event that triggers when a player updates.
-    async fn player_update(&self, _client: LavalinkClient, _event: PlayerUpdate) {}
     /// Event that triggers when an exception happens with a track.
-    async fn track_exception(&self, _client: LavalinkClient, _event: TrackException) {}
+    async fn track_exception(&self, _client: LavalinkClient, _event: TrackException) {
+        info!("track exception");
+    }
     /// Event that triggers when the websocket connection to the voice channel closes.
-    async fn websocket_closed(&self, _client: LavalinkClient, _event: WebSocketClosed) {}
+    async fn websocket_closed(&self, _client: LavalinkClient, _event: WebSocketClosed) {
+        info!("websocket closed");
+    }
     /// Event that triggers when the player gets destroyed on a guild.
-    async fn player_destroyed(&self, _client: LavalinkClient, _event: PlayerDestroyed) {}
+    async fn player_destroyed(&self, _client: LavalinkClient, _event: PlayerDestroyed) {
+        info!("player destroyed");
+    }
 }
 
 pub struct MysqlConnection;
@@ -460,7 +467,7 @@ impl TypeMapKey for HasBossMusic {
 }
 
 pub struct GuildTrack {
-    volume: f32,
+    volume: u16,
 }
 pub struct GuildTrackMap;
 impl TypeMapKey for GuildTrackMap {
@@ -511,6 +518,7 @@ async fn main() {
     {
         Ok(ok) => ok,
         Err(err) => {
+            // try to reconect
             let mut restart_counter = 0;
             loop {
                 if restart_counter > 10 {
