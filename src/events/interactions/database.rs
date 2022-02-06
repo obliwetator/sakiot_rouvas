@@ -1,8 +1,6 @@
+use crate::database::get_conn_from_ctx;
 use mysql_async::prelude::Queryable;
 use serenity::client::Context;
-use tracing::info;
-
-use crate::database::get_conn_from_ctx;
 
 pub async fn add_track_to_db(
     ctx: Context,
@@ -22,6 +20,4 @@ pub async fn add_track_to_db(
             panic!("error when trying to insert: {}", err)
         }
     }
-
-    info!("Downloaded track: {}.{}", title, ext);
 }

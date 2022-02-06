@@ -12,13 +12,14 @@ use serenity::{
         },
     },
 };
+use tracing::info;
 
 use crate::{
     events::interactions::{get_songbird_manager, interactions::download_track_async},
     GuildTrackMap,
 };
 
-use std::{convert::TryInto, fmt::Write};
+use std::fmt::Write;
 
 use super::{
     helpers::{
@@ -27,6 +28,8 @@ use super::{
     },
     lavalink::get_lavalink_client,
 };
+
+const MAX_DISPLAY_QUEUED_TRACKS: usize = 19;
 
 pub async fn handle_j(ctx: &Context, command: &ApplicationCommandInteraction) {
     // Immediatly respond to the interaction which we will edit later
@@ -53,7 +56,7 @@ async fn fun_name(command: &ApplicationCommandInteraction, ctx: &Context, guild_
         // TDOD: proper link validation
         if string_result.contains("youtube.com") {
             if string_result.contains("playlist") {
-                // handle_playlist(ctx, command)
+                handle_playlist(ctx, command).await;
             } else {
                 handle_youtube_link(string_result, command, ctx, guild_id).await;
             }
@@ -96,8 +99,17 @@ pub async fn display_current_queue(ctx: &Context, command: &ApplicationCommandIn
                         Some(ok) => &ok.title,
                         None => "Unkown title",
                     };
-
-                    writeln!(&mut output, "{}) {}", i + 1, title).expect("cannot write to buffer");
+                    // the output cannot be longer than 2000 characters (discord limit)
+                    // If the current title would exceed the specified ammount, don;t write to it and instead list how many tracks are queued
+                    if output.len() + title.len() > 1950 || i > MAX_DISPLAY_QUEUED_TRACKS {
+                        let songs_left = format!("... {} more queued", ok.queue.len() - (i + 1));
+                        writeln!(&mut output, "{}", songs_left).expect("cannot write to buffer");
+                        // No point in writing anything else
+                        break;
+                    } else {
+                        writeln!(&mut output, "{}) {}", i + 1, title)
+                            .expect("cannot write to buffer");
+                    }
                 }
 
                 match command
@@ -182,6 +194,7 @@ pub async fn handle_vol(ctx: &Context, command: &ApplicationCommandInteraction) 
     };
 
     match command.data.options.get(0) {
+        // change the current volume
         Some(float) => {
             let option = float.resolved.as_ref().expect("cannot get value");
             // we have a value change the volume
@@ -239,6 +252,7 @@ pub async fn handle_vol(ctx: &Context, command: &ApplicationCommandInteraction) 
             }
         }
         None => {
+            // No arguments. Display the current volume
             {
                 let map_lock = {
                     let data_read = ctx.data.read().await;
@@ -276,7 +290,7 @@ pub async fn handle_playlist(ctx: &Context, command: &ApplicationCommandInteract
         None => return,
     };
 
-    let lava_client = get_lavalink_client(ctx).await;
+    let lavalink = get_lavalink_client(ctx).await;
     let _handle_lock =
         join_or_get_voice_channel(ctx, guild_id, connect_to, command.channel_id).await;
 
@@ -284,7 +298,7 @@ pub async fn handle_playlist(ctx: &Context, command: &ApplicationCommandInteract
     if let ApplicationCommandInteractionDataOptionValue::String(option) = option {
         // TDOD: proper link validation
         if option.contains("youtube.com") {
-            let query_information = lava_client
+            let query_information = lavalink
                 .auto_search_tracks(option)
                 .await
                 .expect("cannot get query info");
@@ -298,10 +312,11 @@ pub async fn handle_playlist(ctx: &Context, command: &ApplicationCommandInteract
                 // return Ok(());
                 println!("empty track");
             }
-
+            let b = lavalink.nodes().await.get(&guild_id.0).unwrap().queue.len();
+            info!("curent lavalink queue length: {}", b);
             // Queue all tracks
             for ele in &query_information.tracks {
-                if let Err(why) = &lava_client
+                if let Err(why) = &lavalink
                     .play(guild_id.0, ele.clone())
                     // Change this to play() if you want your own custom queue or no queue at all.
                     .queue()
@@ -528,40 +543,46 @@ pub async fn handle_search_string_application_command(
 ) {
     // We search youtube for the string
     let lavalink = get_lavalink_client(ctx).await;
-    let tracks = lavalink
-        .search_tracks(option)
-        .await
-        .expect("cannot find track");
+    let manager = songbird::get(ctx).await.unwrap().clone();
 
-    if tracks.tracks.is_empty() {
-        edit_original_response_simple_content(command, ctx, "Search returned no results").await;
-        return;
-    }
+    if let Some(_handler) = manager.get(guild_id) {
+        let tracks = lavalink
+            .search_tracks(option)
+            .await
+            .expect("cannot find track");
 
-    match lavalink
-        .play(guild_id.0, tracks.tracks[0].clone())
-        .queue()
-        .await
-    {
-        Ok(_) => {}
-        Err(err) => {
-            // TODO: send response
-            panic!("cannot play track: {}", err);
+        if tracks.tracks.is_empty() {
+            edit_original_response_simple_content(command, ctx, "Search returned no results").await;
+            return;
         }
-    };
 
-    download_track_async(ctx, option, guild_id).await;
-    play_audio_from_string(
-        command,
-        ctx,
-        tracks.tracks[0]
-            .info
-            .as_ref()
-            .expect("cannot get info from track")
-            .title
-            .as_str(),
-    )
-    .await;
+        match lavalink
+            .play(guild_id.0, tracks.tracks[0].clone())
+            .queue()
+            .await
+        {
+            Ok(_) => {}
+            Err(err) => {
+                // TODO: send response
+                panic!("cannot play track: {}", err);
+            }
+        };
+
+        download_track_async(ctx, option, guild_id).await;
+        play_audio_from_string(
+            command,
+            ctx,
+            tracks.tracks[0]
+                .info
+                .as_ref()
+                .expect("cannot get info from track")
+                .title
+                .as_str(),
+        )
+        .await;
+    } else {
+        info!("Bot not in a voice channel");
+    }
 }
 
 pub async fn hanle_fast_forward_audio_application_command(
@@ -574,14 +595,25 @@ pub async fn hanle_fast_forward_audio_application_command(
     let manager = get_songbird_manager(ctx).await;
 
     match manager.get(guild_id) {
-        Some(handle_lock) => {
+        Some(_handle_lock) => {
             // handle_handle(handle_lock, command, ctx).await;
-            let handle = handle_lock.lock().await;
-            let queue = handle.queue();
-            // TODO:
-            if queue.is_empty() {
-                // queue empty send appropriate message
+            let lavalink = get_lavalink_client(ctx).await;
+            let is_playing = match lavalink.nodes().await.get(&guild_id.0) {
+                Some(ok) => {
+                    ok.now_playing.is_some()
+                    // A track is playing we can ff
+                }
+                None => {
+                    // Node not present(shouldn't happen)
+                    false
+                }
+            };
 
+            if is_playing {
+                // we can ff
+                // lavalink.seek(guild_id.0, time);
+            } else {
+                // error message
                 match command
                     .create_interaction_response(ctx, |f| {
                         f.kind(InteractionResponseType::ChannelMessageWithSource)
@@ -598,23 +630,20 @@ pub async fn hanle_fast_forward_audio_application_command(
                         panic!("cannot send response err: {}", err)
                     }
                 };
-
-                return;
             }
+            // // get the track handle
+            // let current = queue.current().expect("cannot get current");
+            // // get the current track position in (secs)
+            // let mut current_time = current.get_info().await.expect("cannot get info").position;
+            // // Move x amount of secs to
+            // current_time += std::time::Duration::from_secs(length.try_into().unwrap());
 
-            // get the track handle
-            let current = queue.current().expect("cannot get current");
-            // get the current track position in (secs)
-            let mut current_time = current.get_info().await.expect("cannot get info").position;
-            // Move x amount of secs to
-            current_time += std::time::Duration::from_secs(length.try_into().unwrap());
-
-            match current.seek_time(current_time) {
-                Ok(_) => {}
-                Err(err) => {
-                    panic!("Cannot ff: {}", err);
-                }
-            };
+            // match current.seek_time(current_time) {
+            //     Ok(_) => {}
+            //     Err(err) => {
+            //         panic!("Cannot ff: {}", err);
+            //     }
+            // };
 
             match command
                 .create_interaction_response(ctx, |f| {

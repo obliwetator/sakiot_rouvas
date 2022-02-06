@@ -426,15 +426,29 @@ impl TypeMapKey for Lavalink {
     type Value = LavalinkClient;
 }
 
-struct LavalinkHandler;
+struct LavalinkHandler {
+    client: Arc<RwLock<TypeMap>>,
+}
 
 #[async_trait]
 impl LavalinkEventHandler for LavalinkHandler {
     /// Periodic event that returns the statistics of the server.
-    async fn stats(&self, _client: LavalinkClient, _event: Stats) {}
+    async fn stats(&self, _client: LavalinkClient, _event: Stats) {
+        // ??
+    }
     /// Event that triggers when a player updates.
-    async fn player_update(&self, _client: LavalinkClient, _event: PlayerUpdate) {
-        // info!("player update");
+    async fn player_update(&self, _client: LavalinkClient, event: PlayerUpdate) {
+        // info!("player_update: {:#?}", event);
+        // TODO: Move this to track_start
+        {
+            // Update the current track position so that we can fast forward x amount of time from this time
+            let mut data = self.client.write().await;
+            let guild_track = data.get_mut::<GuildTrackMap>().unwrap();
+            let mut mutex_guard = guild_track.lock().await;
+            let mut hash_map = mutex_guard.get_mut(&event.guild_id.0).unwrap();
+            hash_map.position = event.state.position;
+            hash_map.how_long = std::time::Instant::now();
+        }
     }
     async fn track_start(&self, _client: LavalinkClient, event: TrackStart) {
         info!("Track started! Guild: {}", event.guild_id);
@@ -468,6 +482,8 @@ impl TypeMapKey for HasBossMusic {
 
 pub struct GuildTrack {
     volume: u16,
+    position: i64,
+    how_long: std::time::Instant,
 }
 pub struct GuildTrackMap;
 impl TypeMapKey for GuildTrackMap {
@@ -478,9 +494,14 @@ impl TypeMapKey for GuildTrackMap {
 async fn main() {
     let mysql_pool = mysql_async::Pool::new(config::DB_URL);
     let subscriber = FmtSubscriber::builder()
+        // .with_thread_names(true)
+        .with_file(true)
+        // .with_target(true)
+        .with_line_number(true)
         // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
         // will be written to stdout.
         .with_max_level(Level::INFO)
+        .pretty()
         // completes the builder.
         .finish();
 
@@ -507,13 +528,15 @@ async fn main() {
         .await
         .expect("Err creating client");
 
-    let lava_client = match LavalinkClient::builder(UserId(890262092668624917))
-        //let lava_client = LavalinkClient::builder(bot_id, &token)
+    let lavalink = match LavalinkClient::builder(UserId(890262092668624917))
+        //let lavalink = LavalinkClient::builder(bot_id, &token)
         .set_host("127.0.0.1")
         .set_password(
             env::var("LAVALINK_PASSWORD").unwrap_or_else(|_| "youshallnotpass".to_string()),
         )
-        .build(LavalinkHandler)
+        .build(LavalinkHandler {
+            client: client.data.clone(),
+        })
         .await
     {
         Ok(ok) => ok,
@@ -532,7 +555,9 @@ async fn main() {
                             env::var("LAVALINK_PASSWORD")
                                 .unwrap_or_else(|_| "youshallnotpass".to_string()),
                         )
-                        .build(LavalinkHandler)
+                        .build(LavalinkHandler {
+                            client: client.data.clone(),
+                        })
                         .await
                     {
                         break ok;
@@ -556,7 +581,7 @@ async fn main() {
         // Custom data
         data.insert::<GuildTrackMap>(Arc::new(Mutex::new(HashMap::new())));
         // Lavalink
-        data.insert::<Lavalink>(lava_client);
+        data.insert::<Lavalink>(lavalink);
     }
 
     // Finally, start a single shard, and start listening to events.

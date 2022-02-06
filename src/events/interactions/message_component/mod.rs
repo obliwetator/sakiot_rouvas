@@ -13,7 +13,7 @@ use serenity::{
     },
 };
 use songbird::input::Input;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     database::get_conn_from_ctx,
@@ -21,6 +21,7 @@ use crate::{
         get_songbird_manager, helpers::get_guild_channel_id_from_interaction_message,
         interactions::ffmpeg_input_from_string,
     },
+    GuildTrackMap,
 };
 
 use super::{
@@ -264,13 +265,16 @@ pub async fn handle_next_audio_in_queue(
                     if node.queue.is_empty() {
                         // IF we skip and the queue is empty that was the last song that did not "skip" properly
                         let _ = lavalink.stop(guild_id.0).await;
-                        send_interaction_message_basic(command, ctx, "skipped 2").await;
-                    } else {
-                        send_interaction_message_basic(command, ctx, "skipped 1").await;
                     }
+
+                    send_interaction_message_basic(
+                        command,
+                        ctx,
+                        format!("skipped {}", _track.track.info.unwrap().title).as_str(),
+                    )
+                    .await;
                 }
             } else {
-                if let Some(node) = lavalink.nodes().await.get(&guild_id.0) {}
                 // nothing is playing atm OR only 1 track is playing
 
                 // match lavalink.stop(guild_id.0).await {
@@ -281,7 +285,7 @@ pub async fn handle_next_audio_in_queue(
                 //         panic!("error when stopping: {}", err)
                 //     }
                 // }
-
+                info!("No audio is playing");
                 match command
                     .create_interaction_response(ctx, |f| {
                         f.kind(InteractionResponseType::ChannelMessageWithSource)
@@ -373,24 +377,88 @@ async fn send_interaction_message_basic_from_message(
 pub async fn hanle_fast_forward_audio(
     ctx: &Context,
     command: &MessageComponentInteraction,
-    length: u64,
+    length: i64,
 ) {
     let (guild_id, _channel_id) = get_guild_channel_id_from_interaction_message(command, ctx).await;
     let manager = get_songbird_manager(ctx).await;
+    let lavalink = get_lavalink_client(ctx).await;
 
     match manager.get(guild_id) {
-        Some(handle_lock) => {
+        Some(_handle_lock) => {
             // handle_handle(handle_lock, command, ctx).await;
-            let handle = handle_lock.lock().await;
-            let queue = handle.queue();
-            if queue.is_empty() {
-                // queue empty send appropriate message
+            if let Some(node) = lavalink.nodes().await.get(&guild_id.0) {
+                // We have a node
+                if node.queue.is_empty() {
+                    // queue empty. No audio to skip
 
+                    // TODO: function
+                    match command
+                        .create_interaction_response(ctx, |f| {
+                            f.kind(InteractionResponseType::ChannelMessageWithSource)
+                                .interaction_response_data(|message| {
+                                    message.content("Nothing to FF").flags(
+                                        InteractionApplicationCommandCallbackDataFlags::EPHEMERAL,
+                                    )
+                                })
+                        })
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(err) => {
+                            panic!("cannot send response err: {}", err)
+                        }
+                    };
+                } else {
+                    let guild_track = ctx
+                        .data
+                        .read()
+                        .await
+                        .get::<GuildTrackMap>()
+                        .expect("cannot get GuildTrackMap")
+                        .clone();
+                    let mutex_guard = guild_track.lock().await;
+                    let guild_track = mutex_guard.get(&guild_id.0).unwrap();
+                    // The current position (can be up to +5 sec)
+                    let position = guild_track.position;
+                    // Offset (0-5 sec)
+                    let time_since = guild_track.how_long.elapsed().as_millis() as i64;
+
+                    info!("position: {:#?}", position);
+                    info!("time_since: {:#?}", time_since);
+                    info!("length: {:#?}", length);
+
+                    let total_millis = (position + time_since + length) as u64;
+
+                    let _result = lavalink
+                        .seek(guild_id.0, std::time::Duration::from_millis(total_millis))
+                        .await;
+
+                    match command
+                        .create_interaction_response(ctx, |f| {
+                            f.kind(InteractionResponseType::ChannelMessageWithSource)
+                                .interaction_response_data(|message| {
+                                    message.content("FF").flags(
+                                        InteractionApplicationCommandCallbackDataFlags::EPHEMERAL,
+                                    )
+                                })
+                        })
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(err) => {
+                            panic!("cannot send response err: {}", err)
+                        }
+                    };
+                }
+            } else {
+                // No node. No audio to skip
+
+                // TODO: function
                 match command
                     .create_interaction_response(ctx, |f| {
                         f.kind(InteractionResponseType::ChannelMessageWithSource)
                             .interaction_response_data(|message| {
-                                message.content("No audio queued").flags(
+                                message.content("Nothing to FF").flags(
                                     InteractionApplicationCommandCallbackDataFlags::EPHEMERAL,
                                 )
                             })
@@ -402,38 +470,7 @@ pub async fn hanle_fast_forward_audio(
                         panic!("cannot send response err: {}", err)
                     }
                 };
-
-                return;
             }
-
-            // get the track handle
-            let current = queue.current().expect("cannot get current");
-            // get the current track position in (secs)
-            let mut current_time = current.get_info().await.expect("cannot get info").position;
-            // Move x amount of secs to
-            current_time += std::time::Duration::from_secs(length);
-
-            match current.seek_time(current_time) {
-                Ok(_) => {}
-                Err(err) => {
-                    panic!("Cannot ff: {}", err);
-                }
-            };
-            match command
-                .create_interaction_response(ctx, |f| {
-                    f.kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|f| {
-                            f.content("ff")
-                                .flags(InteractionApplicationCommandCallbackDataFlags::EPHEMERAL)
-                        })
-                })
-                .await
-            {
-                Ok(_) => {}
-                Err(err) => {
-                    panic!("cannot send response err: {}", err)
-                }
-            };
         }
         None => {
             match command
@@ -458,22 +495,26 @@ pub async fn hanle_fast_forward_audio(
 
 pub async fn handle_stop_audio(ctx: &Context, command: &MessageComponentInteraction) {
     let (guild_id, _channel_id) = get_guild_channel_id_from_interaction_message(command, ctx).await;
+    let lavalink = get_lavalink_client(ctx).await;
     let manager = get_songbird_manager(ctx).await;
 
     match manager.get(guild_id) {
-        Some(handle_lock) => {
-            // handle_handle(handle_lock, command, ctx).await;
-            let handle = handle_lock.lock().await;
-            let queue = handle.queue();
-            // TODO:
-            if queue.is_empty() {
-                // queue empty send appropriate message
-                println!("queue is empty on stop");
-            } else {
+        Some(_handle_lock) => {
+            let result = lavalink.stop(guild_id.0).await;
+            {
+                let nodes = lavalink.nodes().await;
+                nodes.remove(&guild_id.0);
+
+                let loops = lavalink.loops().await;
+                loops.remove(&guild_id.0);
             }
 
-            queue.stop();
-
+            match result {
+                Ok(_) => {}
+                Err(err) => {
+                    warn!("Error when stopping queue: {}", err);
+                }
+            }
             match command
                 .create_interaction_response(ctx, |f| {
                     f.kind(InteractionResponseType::ChannelMessageWithSource)
@@ -514,27 +555,34 @@ pub async fn handle_play_pause_audio(ctx: &Context, command: &MessageComponentIn
     let (guild_id, _channel_id) = get_guild_channel_id_from_interaction_message(command, ctx).await;
     let manager = get_songbird_manager(ctx).await;
     let lavalink = get_lavalink_client(ctx).await;
-    info!("here");
+
     match manager.get(guild_id) {
         Some(_handle_lock) => {
-            info!("got handle");
-
-            if let Some(ok) = lavalink
+            let is_paused = match lavalink
                 .nodes()
                 .await
                 .get(&command.guild_id.expect("expected guild_id").0)
             {
-                info!("is paused: {}", ok.is_paused);
+                Some(ok) => ok.is_paused,
+                None => {
+                    panic!("No node");
+                }
+            };
 
-                match lavalink.set_pause(guild_id.0, !ok.is_paused).await {
-                    Ok(_) => {}
-                    Err(err) => {
-                        panic!("error when setting paused: {}", err);
-                    }
-                };
-            } else {
-                info!("No node???");
-            }
+            info!("is paused: {}", is_paused);
+            match lavalink.set_pause(guild_id.0, !is_paused).await {
+                Ok(_) => {
+                    send_interaction_message_basic(
+                        command,
+                        ctx,
+                        if is_paused { "Playing" } else { "Paused" },
+                    )
+                    .await;
+                }
+                Err(err) => {
+                    panic!("error when setting paused: {}", err);
+                }
+            };
         }
         None => {
             match command

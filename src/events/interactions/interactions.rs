@@ -15,6 +15,7 @@ use serenity::{
     prelude::*,
 };
 use songbird::{input::Restartable, Event, EventContext, EventHandler as VoiceEventHandler};
+use tracing::info;
 
 use crate::events::interactions::message_component::{
     handle_delete_and_skip_from_jam, handle_jam_it, handle_next_audio_in_queue,
@@ -81,50 +82,7 @@ pub async fn interaction_create(ctx: Context, interaction: Interaction) {
             "vol" => handle_vol(&ctx, &command).await,
             "playlist" => handle_playlist(&ctx, &command).await,
             "join" => handle_join(&ctx, &command).await,
-            "ff" => {
-                let option = command
-                    .data
-                    .options
-                    .get(0)
-                    .expect("Expected required field")
-                    .resolved
-                    .as_ref()
-                    .expect("Expected required value");
-                if let ApplicationCommandInteractionDataOptionValue::Integer(value) = option {
-                    if *value < 0 {
-                        // No queue present. Send approriate message
-                        match command
-                            .create_interaction_response(&ctx.http, |response| {
-                                response
-                                    .kind(InteractionResponseType::ChannelMessageWithSource)
-                                    .interaction_response_data(|message| {
-                                        message.content("Provide a positive number")
-										.flags(InteractionApplicationCommandCallbackDataFlags::EPHEMERAL)
-                                    })
-                            })
-                            .await
-                        {
-                            Ok(_) => {}
-                            Err(err) => {
-                                panic!("cannot send response err 2: {}", err)
-                            }
-                        };
-
-                        return;
-                    }
-                    hanle_fast_forward_audio_application_command(&ctx, &command, *value).await
-                } else {
-                    match command
-                        .edit_original_interaction_response(ctx, |f| f.content("Provide a number"))
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(err) => {
-                            panic!("cannot send response err 2: {}", err)
-                        }
-                    };
-                }
-            }
+            "ff" => handle_ff(&ctx, &command).await,
             _ => {
                 send_interaction_message_basic(
                     &command,
@@ -151,7 +109,12 @@ pub async fn interaction_create(ctx: Context, interaction: Interaction) {
                 handle_stop_audio(&ctx, &command).await;
             }
             "ff" => {
-                hanle_fast_forward_audio(&ctx, &command, 15).await;
+                hanle_fast_forward_audio(
+                    &ctx,
+                    &command,
+                    std::time::Duration::new(15, 0).as_millis() as i64,
+                )
+                .await;
             }
             "jam_it" => {
                 handle_jam_it(&ctx, &command).await;
@@ -176,9 +139,50 @@ pub async fn interaction_create(ctx: Context, interaction: Interaction) {
         println!("ping");
     }
 
-    println!("Time elapsed: {} seconds", now.elapsed().as_secs_f64());
     println!("Time elapsed: {} micros", now.elapsed().as_micros());
-    println!("Time elapsed: {} nanos", now.elapsed().as_nanos());
+}
+
+async fn handle_ff(
+    ctx: &Context,
+    command: &serenity::model::interactions::application_command::ApplicationCommandInteraction,
+) {
+    let option = get_option_at_index_application_command(command, 0).await;
+
+    if let ApplicationCommandInteractionDataOptionValue::Integer(value) = option {
+        if *value < 0 {
+            // Cannot fast forward negative value
+            match command
+                .create_interaction_response(&ctx.http, |response| {
+                    response
+                        .kind(InteractionResponseType::ChannelMessageWithSource)
+                        .interaction_response_data(|message| {
+                            message
+                                .content("Provide a positive number")
+                                .flags(InteractionApplicationCommandCallbackDataFlags::EPHEMERAL)
+                        })
+                })
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => {
+                    panic!("cannot send response err 2: {}", err)
+                }
+            };
+
+            return;
+        }
+        hanle_fast_forward_audio_application_command(ctx, command, *value).await
+    } else {
+        match command
+            .edit_original_interaction_response(ctx, |f| f.content("Provide a number"))
+            .await
+        {
+            Ok(_) => {}
+            Err(err) => {
+                panic!("cannot send response err 2: {}", err)
+            }
+        };
+    }
 }
 
 // async fn ffrobe_header(audio_name: &str, ext: &str) -> Vec<u8> {
@@ -198,6 +202,7 @@ pub async fn download_track_async(ctx: &Context, option: &str, guild_id: GuildId
     let stra = Arc::new(option.to_owned());
     tokio::spawn(async move {
         let (title, ext) = ytdl_input_from_string(&stra).await;
+        info!("Downloaded track: {}.{}", title, ext);
         add_track_to_db(ctx1, guild_id, title, ext).await;
     });
 }
