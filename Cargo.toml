@@ -27,13 +27,15 @@ reqwest = "0.11"
 regex = "1.5.4"
 byteorder = "1.4.3"
 tracing = "0.1"
-tracing-subscriber = "0.2"
+tracing-subscriber = "0.3"
 chrono = "0.4"
 [dependencies.lavalink-rs]
 git = "https://gitlab.com/vicky5124/lavalink-rs/"
 branch = "master"
 
-
+[profile.dev]
+incremental = true
+debug = false
 [profile.release]
 # debug = true
 incremental = true
